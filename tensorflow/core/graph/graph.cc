@@ -26,6 +26,8 @@ limitations under the License.
 
 namespace tensorflow {
 
+const int Graph::kControlSlot = -1;
+
 // Node
 
 string Node::DebugString() const {
@@ -93,8 +95,10 @@ void Node::Initialize(int id, int cost_id, Properties* props) {
   SET_CLASS(NC_HOST_RECV, ts, "_HostRecv", "");
   SET_CLASS(NC_CONSTANT, ts, "Const", "HostConst");
   SET_CLASS(NC_VARIABLE, ts, "Variable", "");
+  SET_CLASS(NC_VARIABLE, ts, "VariableV2", "");
   SET_CLASS(NC_IDENTITY, ts, "Identity", "RefIdentity");
   SET_CLASS(NC_GET_SESSION_HANDLE, ts, "GetSessionHandle", "");
+  SET_CLASS(NC_GET_SESSION_HANDLE, ts, "GetSessionHandleV2", "");
   SET_CLASS(NC_GET_SESSION_TENSOR, ts, "GetSessionTensor", "");
   SET_CLASS(NC_DELETE_SESSION_TENSOR, ts, "DeleteSessionTensor", "");
   if (class_ == NC_UNINITIALIZED) {
@@ -142,6 +146,68 @@ void Node::MaybeCopyOnWrite() {
 void Node::ClearAttr(const string& name) {
   MaybeCopyOnWrite();
   (*props_->node_def_.mutable_attr()).erase(name);
+}
+
+Status Node::input_edge(int idx, const Edge** e) const {
+  if (idx < 0 || idx >= num_inputs()) {
+    return errors::InvalidArgument("Invalid input_edge index: ", idx, ", Node ",
+                                   name(), " only has ", num_inputs(),
+                                   " inputs.");
+  }
+
+  // This does a linear search over the edges.  In the common case,
+  // the number of elements is small enough that this search isn't
+  // expensive.  Should it become a bottleneck, one can make an
+  // optimization where, if the number of edges is small, we use
+  // linear iteration, and if the number of edges is large, we perform
+  // an indexing step during construction that keeps an array of Edges
+  // indexed by pointer.  This would keep the size of each Node small
+  // in the common case but make this function faster when the number
+  // of edges is large.
+  for (const Edge* edge : in_edges()) {
+    if (edge->dst_input() == idx) {
+      *e = edge;
+      return Status::OK();
+    }
+  }
+
+  return errors::NotFound("Could not find input edge ", idx, " for ", name());
+}
+
+// Returns a vector of the non-control input edges to a node, indexed by ID.
+Status Node::input_edges(std::vector<const Edge*>* input_edges) const {
+  input_edges->clear();
+  input_edges->resize(num_inputs(), nullptr);
+
+  for (const Edge* edge : in_edges()) {
+    if (edge->IsControlEdge()) continue;
+    if (edge->dst_input() < 0 || edge->dst_input() >= num_inputs()) {
+      return errors::Internal("Invalid edge input number ", edge->dst_input());
+    }
+    if ((*input_edges)[edge->dst_input()] != nullptr) {
+      return errors::Internal("Duplicate edge input number: ",
+                              edge->dst_input());
+    }
+    (*input_edges)[edge->dst_input()] = edge;
+  }
+
+  for (int i = 0; i < num_inputs(); ++i) {
+    if ((*input_edges)[i] == nullptr) {
+      return errors::InvalidArgument("Missing edge input number: ", i);
+    }
+  }
+  return Status::OK();
+}
+
+Status Node::input_node(int idx, const Node** n) const {
+  const Edge* e;
+  TF_RETURN_IF_ERROR(input_edge(idx, &e));
+  if (e == nullptr) {
+    *n = nullptr;
+  } else {
+    *n = e->src();
+  }
+  return Status::OK();
 }
 
 // Node::Properties
